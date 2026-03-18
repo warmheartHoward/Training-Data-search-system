@@ -3,6 +3,7 @@ Streamlit Dashboard：文物世界知识训练数据检索系统。
 
 功能：
 - 训练数据检索：上传评测文物图像 + 输入文物名称，检索训练集中的相似样本及其标注
+- 批量评测：对整个 benchmark 文件夹批量检索，查看每个评测样本在训练集中的覆盖情况
 - 数据质检：扫描 tar+JSONL 数据目录，多维度质检
 
 启动方式：
@@ -21,6 +22,7 @@ from data.data_scanner import scan_dataset
 from data.tar_reader import load_image, load_image_bytes
 from data.quality_checker import check_dataset, Severity
 from configs.config import ModelConfig, IndexConfig, AppConfig
+from utils.benchmark_loader import scan_benchmark_folder, extract_model_keys, get_entity_name
 
 
 # ============================================================================
@@ -86,6 +88,47 @@ st.markdown("""
         overflow-y: auto;
         color: #333;
     }
+    .bench-query-card {
+        border: 2px solid #1976d2;
+        border-radius: 12px;
+        padding: 16px 20px;
+        background: linear-gradient(135deg, #e3f2fd 0%, #f0f7ff 100%);
+        margin-bottom: 16px;
+    }
+    .bench-query-card .entity-name {
+        font-size: 22px;
+        color: #0d47a1;
+    }
+    .bench-nav {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 8px 0;
+    }
+    .bench-stat-card {
+        text-align: center;
+        padding: 12px;
+        border-radius: 10px;
+        background: #f8f9fa;
+        border: 1px solid #e0e0e0;
+    }
+    .bench-stat-card .stat-value {
+        font-size: 28px;
+        font-weight: 700;
+        color: #1a1a2e;
+    }
+    .bench-stat-card .stat-label {
+        font-size: 13px;
+        color: #666;
+        margin-top: 4px;
+    }
+    .hidden-count {
+        font-size: 13px;
+        color: #999;
+        font-style: italic;
+        padding: 8px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -102,6 +145,12 @@ def score_css_class(score: float) -> tuple[str, str]:
         return "sim-mid", "score-mid"
     else:
         return "sim-low", "score-low"
+
+
+@st.cache_resource(show_spinner="正在加载模型和索引 ...")
+def get_service() -> RetrievalService:
+    """全局单例：加载模型和 FAISS 索引（首次调用时执行，后续复用缓存）。"""
+    return RetrievalService(ModelConfig(), IndexConfig(), AppConfig())
 
 
 def render_result_card(result):
@@ -138,21 +187,19 @@ def render_result_card(result):
 #  Tab 导航
 # ============================================================================
 
-tab_retrieval, tab_qc = st.tabs(["🔍 训练数据检索", "📋 数据质检"])
+tab_retrieval, tab_bench, tab_qc = st.tabs([
+    "🔍 训练数据检索", "📊 批量评测", "📋 数据质检"
+])
 
 
 # ============================================================================
-#  Tab 1：泄露检索
+#  Tab 1：训练数据检索
 # ============================================================================
 
 with tab_retrieval:
     st.header("文物训练数据检索")
     st.caption("上传评测文物图像 / 输入文物名称，检索训练集中的相似样本及其标注内容。"
                "相似度 >0.9 高度相似（红色），>0.7 中度相似（橙色），帮助分析模型知识来源。")
-
-    @st.cache_resource(show_spinner="正在加载模型和索引 ...")
-    def get_service() -> RetrievalService:
-        return RetrievalService(ModelConfig(), IndexConfig(), AppConfig())
 
     # ---- 侧边栏 ----
     with st.sidebar:
@@ -324,3 +371,299 @@ with tab_qc:
                                 f"`{iss.field}` — {iss.message}")
         else:
             st.success("🎉 所有样本均通过质检！")
+
+
+# ============================================================================
+#  Tab 3：批量评测
+# ============================================================================
+
+with tab_bench:
+    st.header("📊 Benchmark 批量评测")
+    st.caption(
+        "指定评测文件夹（图像 + 同名 JSON），批量检索每个评测样本在训练集中的覆盖情况。"
+        "支持按相似度阈值过滤，逐样本浏览检索结果与训练标注。"
+    )
+
+    # ---- 控制栏 ----
+    bench_c1, bench_c2 = st.columns([3, 1])
+    with bench_c1:
+        bench_folder = st.text_input(
+            "📁 评测数据文件夹",
+            placeholder="例如：/data/benchmark/cultural_relics",
+            key="bench_folder_input",
+        )
+    with bench_c2:
+        scan_clicked = st.button("🔍 扫描文件夹", use_container_width=True)
+
+    # ---- 扫描文件夹 ----
+    if scan_clicked and bench_folder:
+        if not os.path.isdir(bench_folder):
+            st.error("文件夹路径不存在！")
+            st.stop()
+        samples = scan_benchmark_folder(bench_folder)
+        if not samples:
+            st.warning("未找到有效的 图像+JSON 配对（要求同名的 .jpg/.png 和 .json）")
+            st.stop()
+        model_keys = extract_model_keys(samples)
+        if not model_keys:
+            st.warning("JSON 文件中未找到有效的模型 QA 结果")
+            st.stop()
+        st.session_state["bench_samples"] = samples
+        st.session_state["bench_model_keys"] = model_keys
+        st.session_state.pop("bench_results", None)
+        st.session_state["bench_current_idx"] = 0
+        st.success(f"扫描完成：找到 {len(samples)} 个评测样本，{len(model_keys)} 个模型")
+
+    # ---- 参数设置与批量检索 ----
+    if "bench_samples" in st.session_state:
+        samples = st.session_state["bench_samples"]
+        model_keys = st.session_state["bench_model_keys"]
+
+        p_c1, p_c2, p_c3, p_c4 = st.columns([2, 1, 1, 1])
+        with p_c1:
+            selected_model = st.selectbox("🤖 选择模型", model_keys, key="bench_model_select")
+        with p_c2:
+            bench_top_k = st.slider("Top-K", 1, 50, 5, key="bench_topk")
+        with p_c3:
+            bench_threshold = st.slider("相似度阈值", 0.0, 1.0, 0.5, 0.05,
+                                        key="bench_threshold")
+        with p_c4:
+            st.markdown("<br>", unsafe_allow_html=True)
+            run_clicked = st.button("🚀 开始批量检索", type="primary",
+                                    use_container_width=True)
+
+        # ---- 执行批量检索 ----
+        if run_clicked:
+            service = get_service()
+            results = {}
+            progress_bar = st.progress(0, text="批量检索中 ...")
+            status_text = st.empty()
+
+            for i, sample in enumerate(samples):
+                entity_name = get_entity_name(sample, selected_model)
+
+                # 图像检索
+                try:
+                    img = Image.open(sample["image_path"]).convert("RGB")
+                    img_results = service.search_by_image(img, top_k=bench_top_k)
+                except Exception:
+                    img_results = []
+
+                # 文本检索
+                txt_results = []
+                if entity_name:
+                    try:
+                        txt_results = service.search_by_text(entity_name, top_k=bench_top_k)
+                    except Exception:
+                        txt_results = []
+
+                results[sample["stem"]] = {
+                    "entity_name": entity_name or "",
+                    "image_results": img_results,
+                    "text_results": txt_results,
+                }
+
+                progress_bar.progress(
+                    (i + 1) / len(samples),
+                    text=f"检索中 ... {i + 1}/{len(samples)} — {sample['stem']}"
+                )
+
+            progress_bar.empty()
+            status_text.empty()
+            st.session_state["bench_results"] = results
+            st.session_state["bench_current_idx"] = 0
+
+        # ---- 展示结果 ----
+        if "bench_results" in st.session_state:
+            results = st.session_state["bench_results"]
+            threshold = st.session_state.get("bench_threshold", 0.5)
+
+            # ---- 总览仪表盘 ----
+            st.markdown("---")
+            st.subheader("📈 覆盖度总览")
+
+            total = len(results)
+            img_hit = 0   # 图像最高分 >= 阈值
+            txt_hit = 0   # 文本最高分 >= 阈值
+            both_hit = 0  # 双匹配
+            none_hit = 0  # 无匹配
+
+            for stem, r in results.items():
+                best_img = r["image_results"][0].score if r["image_results"] else 0.0
+                best_txt = r["text_results"][0].score if r["text_results"] else 0.0
+                i_hit = best_img >= threshold
+                t_hit = best_txt >= threshold
+                if i_hit:
+                    img_hit += 1
+                if t_hit:
+                    txt_hit += 1
+                if i_hit and t_hit:
+                    both_hit += 1
+                if not i_hit and not t_hit:
+                    none_hit += 1
+
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.markdown(
+                f'<div class="bench-stat-card">'
+                f'<div class="stat-value">{total}</div>'
+                f'<div class="stat-label">总样本数</div></div>',
+                unsafe_allow_html=True)
+            s2.markdown(
+                f'<div class="bench-stat-card">'
+                f'<div class="stat-value" style="color:#ff4444">{img_hit}</div>'
+                f'<div class="stat-label">图像匹配 ({img_hit*100//max(total,1)}%)</div></div>',
+                unsafe_allow_html=True)
+            s3.markdown(
+                f'<div class="bench-stat-card">'
+                f'<div class="stat-value" style="color:#ff8800">{txt_hit}</div>'
+                f'<div class="stat-label">文本匹配 ({txt_hit*100//max(total,1)}%)</div></div>',
+                unsafe_allow_html=True)
+            s4.markdown(
+                f'<div class="bench-stat-card">'
+                f'<div class="stat-value" style="color:#d32f2f">{both_hit}</div>'
+                f'<div class="stat-label">双重匹配 ({both_hit*100//max(total,1)}%)</div></div>',
+                unsafe_allow_html=True)
+            s5.markdown(
+                f'<div class="bench-stat-card">'
+                f'<div class="stat-value" style="color:#44bb44">{none_hit}</div>'
+                f'<div class="stat-label">无匹配 ({none_hit*100//max(total,1)}%)</div></div>',
+                unsafe_allow_html=True)
+
+            # ---- 总览表格 ----
+            st.markdown("")
+            import pandas as pd
+            table_rows = []
+            for stem, r in results.items():
+                best_img = r["image_results"][0].score if r["image_results"] else 0.0
+                best_txt = r["text_results"][0].score if r["text_results"] else 0.0
+                i_hit = best_img >= threshold
+                t_hit = best_txt >= threshold
+                status = "🔴 双匹配" if (i_hit and t_hit) else \
+                         "🟠 图像匹配" if i_hit else \
+                         "🟡 文本匹配" if t_hit else "🟢 无匹配"
+                table_rows.append({
+                    "样本": stem,
+                    "文物名称": r["entity_name"] or "-",
+                    "最高图像相似度": round(best_img, 4),
+                    "最高文本相似度": round(best_txt, 4),
+                    "覆盖状态": status,
+                })
+
+            df = pd.DataFrame(table_rows)
+            df = df.sort_values("最高图像相似度", ascending=False).reset_index(drop=True)
+
+            with st.expander("📋 查看全部样本总览表", expanded=False):
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    height=min(400, 35 * len(df) + 38),
+                )
+
+            # ---- 逐样本浏览器 ----
+            st.markdown("---")
+            st.subheader("🔎 逐样本浏览")
+
+            sample_stems = list(results.keys())
+            num_samples = len(sample_stems)
+
+            # 导航
+            nav_c1, nav_c2, nav_c3, nav_c4 = st.columns([1, 1, 4, 1])
+            with nav_c1:
+                if st.button("⬅️ 上一个", use_container_width=True, key="bench_prev"):
+                    idx = st.session_state.get("bench_current_idx", 0)
+                    st.session_state["bench_current_idx"] = max(0, idx - 1)
+            with nav_c2:
+                if st.button("下一个 ➡️", use_container_width=True, key="bench_next"):
+                    idx = st.session_state.get("bench_current_idx", 0)
+                    st.session_state["bench_current_idx"] = min(num_samples - 1, idx + 1)
+            with nav_c3:
+                jump_idx = st.number_input(
+                    "跳转到", min_value=1, max_value=num_samples,
+                    value=st.session_state.get("bench_current_idx", 0) + 1,
+                    key="bench_jump",
+                )
+                st.session_state["bench_current_idx"] = jump_idx - 1
+            with nav_c4:
+                st.markdown(
+                    f"<div style='text-align:center;padding-top:28px;color:#666;'>"
+                    f"共 {num_samples} 个样本</div>",
+                    unsafe_allow_html=True)
+
+            current_idx = st.session_state.get("bench_current_idx", 0)
+            current_stem = sample_stems[current_idx]
+            current_result = results[current_stem]
+
+            # 找到对应的样本信息
+            current_sample = next(
+                (s for s in samples if s["stem"] == current_stem), None
+            )
+
+            # ---- 当前样本卡片 ----
+            st.markdown(f"### 样本 {current_idx + 1}/{num_samples}：`{current_stem}`")
+
+            query_col1, query_col2 = st.columns([1, 2])
+            with query_col1:
+                if current_sample:
+                    try:
+                        bench_img = Image.open(current_sample["image_path"]).convert("RGB")
+                        st.image(bench_img, caption="评测文物图像", use_container_width=True)
+                    except Exception:
+                        st.warning("图像加载失败")
+            with query_col2:
+                entity = current_result["entity_name"]
+                best_img_score = (current_result["image_results"][0].score
+                                  if current_result["image_results"] else 0.0)
+                best_txt_score = (current_result["text_results"][0].score
+                                  if current_result["text_results"] else 0.0)
+
+                st.markdown(
+                    f'<div class="bench-query-card">'
+                    f'  <div class="entity-name">{entity or "(无实体名称)"}</div>'
+                    f'  <div style="margin-top:12px;font-size:14px;color:#555;">'
+                    f'    最高图像相似度：<b>{best_img_score:.4f}</b> &emsp; '
+                    f'    最高文本相似度：<b>{best_txt_score:.4f}</b>'
+                    f'  </div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("---")
+
+            # ---- 检索结果：左右两列 ----
+            res_col_img, res_col_txt = st.columns(2)
+
+            with res_col_img:
+                st.markdown("#### 🖼️ 视觉相似样本")
+                img_results = current_result["image_results"]
+                shown = [r for r in img_results if r.score >= threshold]
+                hidden = len(img_results) - len(shown)
+                if shown:
+                    for r in shown:
+                        render_result_card(r)
+                        st.markdown("")
+                else:
+                    st.info("无超过阈值的视觉相似结果")
+                if hidden > 0:
+                    st.markdown(
+                        f'<div class="hidden-count">'
+                        f'已隐藏 {hidden} 条低于阈值 ({threshold:.2f}) 的结果</div>',
+                        unsafe_allow_html=True)
+
+            with res_col_txt:
+                st.markdown("#### 📝 名称相似样本")
+                txt_results = current_result["text_results"]
+                shown = [r for r in txt_results if r.score >= threshold]
+                hidden = len(txt_results) - len(shown)
+                if shown:
+                    for r in shown:
+                        render_result_card(r)
+                        st.markdown("")
+                elif not entity:
+                    st.info("该样本无实体名称，跳过文本检索")
+                else:
+                    st.info("无超过阈值的文本相似结果")
+                if hidden > 0:
+                    st.markdown(
+                        f'<div class="hidden-count">'
+                        f'已隐藏 {hidden} 条低于阈值 ({threshold:.2f}) 的结果</div>',
+                        unsafe_allow_html=True)
