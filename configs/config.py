@@ -29,6 +29,11 @@ class IndexConfig:
     image_index_file: str = "image_index.faiss"
     text_index_file: str = "text_index.faiss"
 
+    def versioned_dir(self, version: str) -> str:
+        """返回特定版本的索引存储目录，如 indexes/v1/"""
+        import os
+        return os.path.join(self.index_dir, version)
+
 
 @dataclass
 class PipelineConfig:

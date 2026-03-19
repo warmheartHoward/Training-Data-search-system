@@ -132,27 +132,39 @@ pip install -r requirements.txt
 ### 2. 离线建库
 
 ```bash
-# 8 卡并行建库
+# 基础用法：8 卡并行建库
 python offline_build_index.py \
     --data_dir /path/to/root_dir \
-    --num_gpus 8 \
-    --index_dir indexes
+    --num_gpus 8
+
+# 按版本建库（推荐）：不同数据集各自生成独立索引
+python offline_build_index.py --data_dir /data/museum_v1   --version museum_v1
+python offline_build_index.py --data_dir /data/auction_v2  --version auction_v2
+python offline_build_index.py --data_dir /data/wiki_v3     --version wiki_v3
 
 # 跳过质检
-python offline_build_index.py --data_dir /path/to/root_dir --skip_qc
+python offline_build_index.py --data_dir /path/to/root_dir --version v1 --skip_qc
 
 # 大数据量用 HNSW 近似索引
-python offline_build_index.py --data_dir /path/to/root_dir --index_type hnsw
+python offline_build_index.py --data_dir /path/to/root_dir --version v1 --index_type hnsw
 ```
 
-建库产出：
+建库产出（多版本目录结构）：
 ```
 indexes/
-├── image_index.faiss      # 图像向量索引
-├── text_index.faiss       # 文本向量索引
-├── image_metadata.pkl     # 图像元信息（含完整训练标注）
-└── text_metadata.pkl      # 文本元信息
+├── museum_v1/
+│   ├── image_index.faiss
+│   ├── text_index.faiss
+│   ├── image_metadata.pkl
+│   └── text_metadata.pkl
+├── auction_v2/
+│   ├── image_index.faiss
+│   └── ...
+└── wiki_v3/
+    └── ...
 ```
+
+> 不指定 `--version` 时索引直接存到 `indexes/` 根目录（兼容旧格式，版本名显示为 `default`）。
 
 ### 3. 启动 Web UI
 
@@ -173,19 +185,20 @@ ssh -L 8501:localhost:8501 user@server
 
 单张交互式检索，适合逐个排查评测样本。
 
-1. 侧边栏上传评测文物图像、输入文物名称
-2. 点击「开始检索」
-3. 左列：视觉相似样本 Top-K（以图搜图）
-4. 右列：名称相似样本 Top-K（以文搜文）
-5. 每张结果卡片显示相似度（红 >0.9 / 橙 >0.7 / 绿）、文物名称、数据来源
-6. 展开「查看训练标注」可查看该样本的完整打标内容
+1. 侧边栏选择数据版本（可多选合并检索）
+2. 上传评测文物图像、输入文物名称
+3. 点击「开始检索」
+4. 左列：视觉相似样本 Top-K（以图搜图）
+5. 右列：名称相似样本 Top-K（以文搜文）
+6. 每张结果卡片显示相似度（红 >0.9 / 橙 >0.7 / 绿）、文物名称、数据来源（多版本时前缀显示版本名）
+7. 展开「查看训练标注」可查看该样本的完整打标内容
 
 ### Tab 2：批量评测
 
 对整个 Benchmark 文件夹一键批量检索，适合系统性评估训练集覆盖度。
 
 1. 输入 Benchmark 文件夹路径 → 扫描 → 自动发现可用模型
-2. 选择模型（如 `Qwen3-VL-235B_V2`），设置 Top-K 和相似度阈值
+2. 选择模型（如 `Qwen3-VL-235B_V2`）和数据版本，设置 Top-K 和相似度阈值
 3. 点击「开始批量检索」，自动遍历所有评测样本（带进度条）
 4. **覆盖度总览**：5 个统计指标 — 总样本数 / 图像匹配数 / 文本匹配数 / 双重匹配数 / 无匹配数
 5. **总览表格**：每个样本的最高相似度和覆盖状态，可排序
@@ -199,6 +212,23 @@ ssh -L 8501:localhost:8501 user@server
 1. 输入训练数据根目录
 2. 自动扫描所有 tar+JSONL 配对
 3. 展示数据分布（数据源、打标模型、来源）和标注质量问题明细
+
+## 数据版本管理
+
+系统支持多版本索引的独立构建和合并检索：
+
+- **建库时** 通过 `--version` 指定版本名，索引存入独立子目录
+- **检索时** UI 自动扫描 `indexes/` 下所有版本，支持多选合并检索
+- 多版本合并检索时，每个版本各自返回 Top-K，系统按分数全局排序后取最终 Top-K
+- 结果卡片的数据来源字段会自动标注版本名（如 `[museum_v1] 上海博物馆`）
+
+典型使用场景：
+```
+# 博物馆数据更新了新一批，单独建库
+python offline_build_index.py --data_dir /data/museum_2026Q1 --version museum_2026Q1
+
+# UI 中同时勾选旧版和新版，合并检索
+```
 
 ## 配置调整
 

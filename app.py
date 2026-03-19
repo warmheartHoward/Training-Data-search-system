@@ -17,7 +17,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from services.retrieval_service import RetrievalService
+from services.retrieval_service import RetrievalService, discover_versions
 from data.data_scanner import scan_dataset
 from data.tar_reader import load_image, load_image_bytes
 from data.quality_checker import check_dataset, Severity
@@ -204,6 +204,21 @@ with tab_retrieval:
     # ---- 侧边栏 ----
     with st.sidebar:
         st.title("🏛️ 检索设置")
+
+        # 数据版本选择
+        _index_cfg = IndexConfig()
+        _all_versions = discover_versions(_index_cfg.index_dir)
+        if _all_versions:
+            selected_versions = st.multiselect(
+                "📦 数据版本",
+                options=_all_versions,
+                default=_all_versions,
+                help="选择要检索的训练数据版本，可多选合并检索",
+            )
+        else:
+            selected_versions = []
+            st.warning("未发现索引版本，请先运行离线建库")
+
         st.markdown("---")
         uploaded_file = st.file_uploader(
             "📷 上传评测文物图像", type=["jpg", "jpeg", "png", "bmp", "webp"])
@@ -242,7 +257,8 @@ with tab_retrieval:
             st.subheader("🖼️ 视觉相似样本")
             if query_image:
                 with st.spinner("图像检索中 ..."):
-                    img_results = service.search_by_image(query_image, top_k=top_k)
+                    img_results = service.search_by_image(
+                        query_image, top_k=top_k, versions=selected_versions)
                 if not img_results:
                     st.info("训练集中未找到视觉相似的文物")
                 else:
@@ -257,7 +273,8 @@ with tab_retrieval:
             st.subheader("📝 名称相似样本")
             if query_text:
                 with st.spinner("文本检索中 ..."):
-                    txt_results = service.search_by_text(query_text, top_k=top_k)
+                    txt_results = service.search_by_text(
+                        query_text, top_k=top_k, versions=selected_versions)
                 if not txt_results:
                     st.info("训练集中未找到名称相似的文物")
                 else:
@@ -419,15 +436,20 @@ with tab_bench:
         samples = st.session_state["bench_samples"]
         model_keys = st.session_state["bench_model_keys"]
 
-        p_c1, p_c2, p_c3, p_c4 = st.columns([2, 1, 1, 1])
+        p_c1, p_c2, p_c3, p_c4, p_c5 = st.columns([2, 2, 1, 1, 1])
         with p_c1:
             selected_model = st.selectbox("🤖 选择模型", model_keys, key="bench_model_select")
         with p_c2:
-            bench_top_k = st.slider("Top-K", 1, 50, 5, key="bench_topk")
+            _bench_versions = discover_versions(IndexConfig().index_dir)
+            bench_versions = st.multiselect(
+                "📦 数据版本", options=_bench_versions,
+                default=_bench_versions, key="bench_versions")
         with p_c3:
+            bench_top_k = st.slider("Top-K", 1, 50, 5, key="bench_topk")
+        with p_c4:
             bench_threshold = st.slider("相似度阈值", 0.0, 1.0, 0.5, 0.05,
                                         key="bench_threshold")
-        with p_c4:
+        with p_c5:
             st.markdown("<br>", unsafe_allow_html=True)
             run_clicked = st.button("🚀 开始批量检索", type="primary",
                                     use_container_width=True)
@@ -445,7 +467,8 @@ with tab_bench:
                 # 图像检索
                 try:
                     img = Image.open(sample["image_path"]).convert("RGB")
-                    img_results = service.search_by_image(img, top_k=bench_top_k)
+                    img_results = service.search_by_image(
+                        img, top_k=bench_top_k, versions=bench_versions)
                 except Exception:
                     img_results = []
 
@@ -453,7 +476,8 @@ with tab_bench:
                 txt_results = []
                 if entity_name:
                     try:
-                        txt_results = service.search_by_text(entity_name, top_k=bench_top_k)
+                        txt_results = service.search_by_text(
+                            entity_name, top_k=bench_top_k, versions=bench_versions)
                     except Exception:
                         txt_results = []
 

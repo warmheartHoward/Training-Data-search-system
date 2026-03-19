@@ -147,9 +147,15 @@ def build_index(
     num_gpus: int = 8,
     index_type: str = "flat",
     index_dir: str = "indexes",
+    version: str = "",
     run_qc: bool = True,
 ) -> None:
     total_start = time.time()
+
+    # 如果指定了 version，索引存到 index_dir/version/ 子目录
+    if version:
+        index_dir = os.path.join(index_dir, version)
+        print(f"[INFO] 数据版本: {version} → 索引目录: {index_dir}")
 
     # ---- 1. 扫描 ----
     print("=" * 60)
@@ -260,6 +266,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_gpus", type=int, default=8)
     parser.add_argument("--index_type", type=str, default="flat", choices=["flat", "hnsw"])
     parser.add_argument("--index_dir", type=str, default="indexes")
+    parser.add_argument("--version", type=str, default="",
+                        help="数据版本名称，索引存到 index_dir/version/ 子目录（如 v1, v2_museum）")
     parser.add_argument("--skip_qc", action="store_true")
     return parser.parse_args()
 
@@ -272,5 +280,6 @@ if __name__ == "__main__":
         num_gpus=args.num_gpus,
         index_type=args.index_type,
         index_dir=args.index_dir,
+        version=args.version,
         run_qc=not args.skip_qc,
     )
