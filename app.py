@@ -527,27 +527,57 @@ with tab_bench:
             st.markdown("---")
             st.subheader("📈 覆盖度总览")
 
+            # 计算每个样本的分类标签
+            import pandas as pd
             total = len(results)
-            img_hit = 0   # 图像最高分 >= 阈值
-            txt_hit = 0   # 文本最高分 >= 阈值
-            both_hit = 0  # 双匹配
-            none_hit = 0  # 无匹配
+            img_hit = 0
+            txt_hit = 0
+            both_hit = 0
+            agree_hit = 0   # 图文一致：图像匹配的训练样本名称也出现在文本匹配中
+            none_hit = 0
+
+            sample_category: dict[str, str] = {}  # stem -> 主分类
 
             for stem, r in results.items():
                 best_img = r["image_results"][0].score if r["image_results"] else 0.0
                 best_txt = r["text_results"][0].score if r["text_results"] else 0.0
                 i_hit = best_img >= threshold
                 t_hit = best_txt >= threshold
+
+                # 图文一致：图像匹配结果中，是否有训练样本的名称也出现在文本匹配结果中
+                img_texts = {ir.text for ir in r["image_results"]
+                             if ir.score >= threshold and ir.text}
+                txt_texts = {tr.text for tr in r["text_results"]
+                             if tr.score >= threshold and tr.text}
+                is_agree = bool(img_texts & txt_texts)
+
                 if i_hit:
                     img_hit += 1
                 if t_hit:
                     txt_hit += 1
                 if i_hit and t_hit:
                     both_hit += 1
+                if is_agree:
+                    agree_hit += 1
                 if not i_hit and not t_hit:
                     none_hit += 1
 
-            s1, s2, s3, s4, s5 = st.columns(5)
+                # 主分类（按优先级）
+                if is_agree:
+                    sample_category[stem] = "图文一致"
+                elif i_hit and t_hit:
+                    sample_category[stem] = "双重匹配"
+                elif i_hit:
+                    sample_category[stem] = "图像匹配"
+                elif t_hit:
+                    sample_category[stem] = "文本匹配"
+                else:
+                    sample_category[stem] = "无匹配"
+
+            def _pct(n: int) -> int:
+                return n * 100 // max(total, 1)
+
+            s1, s2, s3, s4, s5, s6 = st.columns(6)
             s1.markdown(
                 f'<div class="bench-stat-card">'
                 f'<div class="stat-value">{total}</div>'
@@ -556,42 +586,79 @@ with tab_bench:
             s2.markdown(
                 f'<div class="bench-stat-card">'
                 f'<div class="stat-value" style="color:#ff4444">{img_hit}</div>'
-                f'<div class="stat-label">图像匹配 ({img_hit*100//max(total,1)}%)</div></div>',
+                f'<div class="stat-label">图像匹配 ({_pct(img_hit)}%)</div></div>',
                 unsafe_allow_html=True)
             s3.markdown(
                 f'<div class="bench-stat-card">'
                 f'<div class="stat-value" style="color:#ff8800">{txt_hit}</div>'
-                f'<div class="stat-label">文本匹配 ({txt_hit*100//max(total,1)}%)</div></div>',
+                f'<div class="stat-label">文本匹配 ({_pct(txt_hit)}%)</div></div>',
                 unsafe_allow_html=True)
             s4.markdown(
                 f'<div class="bench-stat-card">'
                 f'<div class="stat-value" style="color:#d32f2f">{both_hit}</div>'
-                f'<div class="stat-label">双重匹配 ({both_hit*100//max(total,1)}%)</div></div>',
+                f'<div class="stat-label">双重匹配 ({_pct(both_hit)}%)</div></div>',
                 unsafe_allow_html=True)
             s5.markdown(
                 f'<div class="bench-stat-card">'
-                f'<div class="stat-value" style="color:#44bb44">{none_hit}</div>'
-                f'<div class="stat-label">无匹配 ({none_hit*100//max(total,1)}%)</div></div>',
+                f'<div class="stat-value" style="color:#9c27b0">{agree_hit}</div>'
+                f'<div class="stat-label">图文一致 ({_pct(agree_hit)}%)</div></div>',
                 unsafe_allow_html=True)
+            s6.markdown(
+                f'<div class="bench-stat-card">'
+                f'<div class="stat-value" style="color:#44bb44">{none_hit}</div>'
+                f'<div class="stat-label">无匹配 ({_pct(none_hit)}%)</div></div>',
+                unsafe_allow_html=True)
+
+            # ---- 筛选器 ----
+            filter_options = {
+                f"全部 ({total})": "全部",
+                f"🔴 图像匹配 ({img_hit})": "图像匹配",
+                f"🟠 文本匹配 ({txt_hit})": "文本匹配",
+                f"🟣 双重匹配 ({both_hit})": "双重匹配",
+                f"🟣 图文一致 ({agree_hit})": "图文一致",
+                f"🟢 无匹配 ({none_hit})": "无匹配",
+            }
+            selected_filter_label = st.radio(
+                "按覆盖状态筛选",
+                options=list(filter_options.keys()),
+                horizontal=True,
+                key="bench_filter",
+            )
+            selected_filter = filter_options[selected_filter_label]
+
+            # 根据筛选器过滤样本
+            if selected_filter == "全部":
+                filtered_stems = list(results.keys())
+            elif selected_filter == "图像匹配":
+                filtered_stems = [s for s, r in results.items()
+                                  if (r["image_results"][0].score if r["image_results"] else 0) >= threshold]
+            elif selected_filter == "文本匹配":
+                filtered_stems = [s for s, r in results.items()
+                                  if (r["text_results"][0].score if r["text_results"] else 0) >= threshold]
+            elif selected_filter == "双重匹配":
+                filtered_stems = [s for s, r in results.items()
+                                  if (r["image_results"][0].score if r["image_results"] else 0) >= threshold
+                                  and (r["text_results"][0].score if r["text_results"] else 0) >= threshold]
+            elif selected_filter == "图文一致":
+                filtered_stems = [s for s in results if sample_category[s] == "图文一致"]
+            else:  # 无匹配
+                filtered_stems = [s for s in results if sample_category[s] == "无匹配"]
 
             # ---- 总览表格 ----
             st.markdown("")
-            import pandas as pd
             table_rows = []
             for stem, r in results.items():
                 best_img = r["image_results"][0].score if r["image_results"] else 0.0
                 best_txt = r["text_results"][0].score if r["text_results"] else 0.0
-                i_hit = best_img >= threshold
-                t_hit = best_txt >= threshold
-                status = "🔴 双匹配" if (i_hit and t_hit) else \
-                         "🟠 图像匹配" if i_hit else \
-                         "🟡 文本匹配" if t_hit else "🟢 无匹配"
+                cat = sample_category[stem]
+                icon = {"图文一致": "🟣", "双重匹配": "🔴",
+                        "图像匹配": "🟠", "文本匹配": "🟡", "无匹配": "🟢"}[cat]
                 table_rows.append({
                     "样本": stem,
                     "文物名称": r["entity_name"] or "-",
                     "最高图像相似度": round(best_img, 4),
                     "最高文本相似度": round(best_txt, 4),
-                    "覆盖状态": status,
+                    "覆盖状态": f"{icon} {cat}",
                 })
 
             df = pd.DataFrame(table_rows)
@@ -627,6 +694,7 @@ with tab_bench:
                     row = {
                         "样本": stem,
                         "检索文本": r["entity_name"] or "",
+                        "覆盖状态": sample_category.get(stem, ""),
                         "图像检索结果": [
                             {"rank": ir.rank, "score": round(ir.score, 4),
                              "text": ir.text, "source": ir.source,
@@ -654,118 +722,138 @@ with tab_bench:
             st.markdown("---")
             st.subheader("🔎 逐样本浏览")
 
-            sample_stems = list(results.keys())
-            num_samples = len(sample_stems)
+            if not filtered_stems:
+                st.info("当前筛选条件下无匹配样本")
+            else:
+                num_filtered = len(filtered_stems)
 
-            # 导航回调（在 rerun 前更新 state，避免被 number_input 覆盖）
-            def _go_prev():
-                idx = st.session_state.get("bench_current_idx", 0)
-                st.session_state["bench_current_idx"] = max(0, idx - 1)
-                st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
+                # 切换筛选条件时重置索引
+                prev_filter = st.session_state.get("_bench_prev_filter", "")
+                if selected_filter != prev_filter:
+                    st.session_state["bench_current_idx"] = 0
+                    st.session_state["_bench_prev_filter"] = selected_filter
 
-            def _go_next():
-                idx = st.session_state.get("bench_current_idx", 0)
-                st.session_state["bench_current_idx"] = min(num_samples - 1, idx + 1)
-                st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
+                # 保证索引不越界
+                if st.session_state.get("bench_current_idx", 0) >= num_filtered:
+                    st.session_state["bench_current_idx"] = 0
 
-            def _on_jump():
-                st.session_state["bench_current_idx"] = st.session_state["bench_jump"] - 1
+                # 导航回调
+                def _go_prev():
+                    idx = st.session_state.get("bench_current_idx", 0)
+                    st.session_state["bench_current_idx"] = max(0, idx - 1)
+                    st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
 
-            nav_c1, nav_c2, nav_c3, nav_c4 = st.columns([1, 1, 4, 1])
-            with nav_c1:
-                st.button("⬅️ 上一个", use_container_width=True,
-                          key="bench_prev", on_click=_go_prev)
-            with nav_c2:
-                st.button("下一个 ➡️", use_container_width=True,
-                          key="bench_next", on_click=_go_next)
-            with nav_c3:
-                st.number_input(
-                    "跳转到", min_value=1, max_value=num_samples,
-                    value=st.session_state.get("bench_current_idx", 0) + 1,
-                    key="bench_jump",
-                    on_change=_on_jump,
-                )
-            with nav_c4:
-                st.markdown(
-                    f"<div style='text-align:center;padding-top:28px;color:#666;'>"
-                    f"共 {num_samples} 个样本</div>",
-                    unsafe_allow_html=True)
+                def _go_next():
+                    idx = st.session_state.get("bench_current_idx", 0)
+                    st.session_state["bench_current_idx"] = min(num_filtered - 1, idx + 1)
+                    st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
 
-            current_idx = st.session_state.get("bench_current_idx", 0)
-            current_stem = sample_stems[current_idx]
-            current_result = results[current_stem]
+                def _on_jump():
+                    st.session_state["bench_current_idx"] = st.session_state["bench_jump"] - 1
 
-            # 找到对应的样本信息
-            current_sample = next(
-                (s for s in samples if s["stem"] == current_stem), None
-            )
-
-            # ---- 当前样本卡片 ----
-            st.markdown(f"### 样本 {current_idx + 1}/{num_samples}：`{current_stem}`")
-
-            query_col1, query_col2 = st.columns([1, 2])
-            with query_col1:
-                if current_sample:
-                    try:
-                        bench_img = Image.open(current_sample["image_path"]).convert("RGB")
-                        st.image(bench_img, caption="评测文物图像", use_container_width=True)
-                    except Exception:
-                        st.warning("图像加载失败")
-            with query_col2:
-                entity = current_result["entity_name"]
-                best_img_score = (current_result["image_results"][0].score
-                                  if current_result["image_results"] else 0.0)
-                best_txt_score = (current_result["text_results"][0].score
-                                  if current_result["text_results"] else 0.0)
-
-                st.markdown(
-                    f'<div class="bench-query-card">'
-                    f'  <div class="entity-name">{entity or "(无实体名称)"}</div>'
-                    f'  <div style="margin-top:12px;font-size:14px;color:#555;">'
-                    f'    最高图像相似度：<b>{best_img_score:.4f}</b> &emsp; '
-                    f'    最高文本相似度：<b>{best_txt_score:.4f}</b>'
-                    f'  </div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-            st.markdown("---")
-
-            # ---- 检索结果：左右两列 ----
-            res_col_img, res_col_txt = st.columns(2)
-
-            with res_col_img:
-                st.markdown("#### 🖼️ 视觉相似样本")
-                img_results = current_result["image_results"]
-                shown = [r for r in img_results if r.score >= threshold]
-                hidden = len(img_results) - len(shown)
-                if shown:
-                    for r in shown:
-                        render_result_card(r)
-                        st.markdown("")
-                else:
-                    st.info("无超过阈值的视觉相似结果")
-                if hidden > 0:
+                nav_c1, nav_c2, nav_c3, nav_c4 = st.columns([1, 1, 4, 1])
+                with nav_c1:
+                    st.button("⬅️ 上一个", use_container_width=True,
+                              key="bench_prev", on_click=_go_prev)
+                with nav_c2:
+                    st.button("下一个 ➡️", use_container_width=True,
+                              key="bench_next", on_click=_go_next)
+                with nav_c3:
+                    st.number_input(
+                        "跳转到", min_value=1, max_value=num_filtered,
+                        value=st.session_state.get("bench_current_idx", 0) + 1,
+                        key="bench_jump",
+                        on_change=_on_jump,
+                    )
+                with nav_c4:
+                    filter_hint = f"（{selected_filter}）" if selected_filter != "全部" else ""
                     st.markdown(
-                        f'<div class="hidden-count">'
-                        f'已隐藏 {hidden} 条低于阈值 ({threshold:.2f}) 的结果</div>',
+                        f"<div style='text-align:center;padding-top:28px;color:#666;'>"
+                        f"共 {num_filtered} 个样本{filter_hint}</div>",
                         unsafe_allow_html=True)
 
-            with res_col_txt:
-                st.markdown("#### 📝 名称相似样本")
-                txt_results = current_result["text_results"]
-                shown = [r for r in txt_results if r.score >= threshold]
-                hidden = len(txt_results) - len(shown)
-                if shown:
-                    for r in shown:
-                        render_result_card(r)
-                        st.markdown("")
-                elif not entity:
-                    st.info("该样本无实体名称，跳过文本检索")
-                else:
-                    st.info("无超过阈值的文本相似结果")
-                if hidden > 0:
+                current_idx = st.session_state.get("bench_current_idx", 0)
+                current_stem = filtered_stems[current_idx]
+                current_result = results[current_stem]
+
+                # 找到对应的样本信息
+                current_sample = next(
+                    (s for s in samples if s["stem"] == current_stem), None
+                )
+
+                # 当前样本的分类标签
+                cat = sample_category.get(current_stem, "")
+                cat_icon = {"图文一致": "🟣", "双重匹配": "🔴",
+                            "图像匹配": "🟠", "文本匹配": "🟡", "无匹配": "🟢"}.get(cat, "")
+
+                # ---- 当前样本卡片 ----
+                st.markdown(
+                    f"### 样本 {current_idx + 1}/{num_filtered}：`{current_stem}`"
+                    f" &ensp;{cat_icon} {cat}")
+
+                query_col1, query_col2 = st.columns([1, 2])
+                with query_col1:
+                    if current_sample:
+                        try:
+                            bench_img = Image.open(current_sample["image_path"]).convert("RGB")
+                            st.image(bench_img, caption="评测文物图像", use_container_width=True)
+                        except Exception:
+                            st.warning("图像加载失败")
+                with query_col2:
+                    entity = current_result["entity_name"]
+                    best_img_score = (current_result["image_results"][0].score
+                                      if current_result["image_results"] else 0.0)
+                    best_txt_score = (current_result["text_results"][0].score
+                                      if current_result["text_results"] else 0.0)
+
                     st.markdown(
-                        f'<div class="hidden-count">'
-                        f'已隐藏 {hidden} 条低于阈值 ({threshold:.2f}) 的结果</div>',
-                        unsafe_allow_html=True)
+                        f'<div class="bench-query-card">'
+                        f'  <div class="entity-name">{entity or "(无实体名称)"}</div>'
+                        f'  <div style="margin-top:12px;font-size:14px;color:#555;">'
+                        f'    最高图像相似度：<b>{best_img_score:.4f}</b> &emsp; '
+                        f'    最高文本相似度：<b>{best_txt_score:.4f}</b>'
+                        f'  </div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown("---")
+
+                # ---- 检索结果：左右两列 ----
+                res_col_img, res_col_txt = st.columns(2)
+
+                with res_col_img:
+                    st.markdown("#### 🖼️ 视觉相似样本")
+                    img_results = current_result["image_results"]
+                    shown = [r for r in img_results if r.score >= threshold]
+                    hidden = len(img_results) - len(shown)
+                    if shown:
+                        for r in shown:
+                            render_result_card(r)
+                            st.markdown("")
+                    else:
+                        st.info("无超过阈值的视觉相似结果")
+                    if hidden > 0:
+                        st.markdown(
+                            f'<div class="hidden-count">'
+                            f'已隐藏 {hidden} 条低于阈值 ({threshold:.2f}) 的结果</div>',
+                            unsafe_allow_html=True)
+
+                with res_col_txt:
+                    st.markdown("#### 📝 名称相似样本")
+                    txt_results = current_result["text_results"]
+                    shown = [r for r in txt_results if r.score >= threshold]
+                    hidden = len(txt_results) - len(shown)
+                    if shown:
+                        for r in shown:
+                            render_result_card(r)
+                            st.markdown("")
+                    elif not entity:
+                        st.info("该样本无实体名称，跳过文本检索")
+                    else:
+                        st.info("无超过阈值的文本相似结果")
+                    if hidden > 0:
+                        st.markdown(
+                            f'<div class="hidden-count">'
+                            f'已隐藏 {hidden} 条低于阈值 ({threshold:.2f}) 的结果</div>',
+                            unsafe_allow_html=True)
