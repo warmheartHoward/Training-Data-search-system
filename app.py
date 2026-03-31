@@ -22,7 +22,10 @@ from data.data_scanner import scan_dataset
 from data.tar_reader import load_image, load_image_bytes
 from data.quality_checker import check_dataset, Severity
 from configs.config import ModelConfig, IndexConfig, AppConfig
-from utils.benchmark_loader import scan_benchmark_folder, extract_model_keys, get_entity_name
+from utils.benchmark_loader import (
+    scan_benchmark_folder, extract_model_keys, get_entity_name,
+    extract_json_fields, get_field_value, preview_field_values,
+)
 
 
 # ============================================================================
@@ -421,35 +424,53 @@ with tab_bench:
         if not samples:
             st.warning("未找到有效的 图像+JSON 配对（要求同名的 .jpg/.png 和 .json）")
             st.stop()
-        model_keys = extract_model_keys(samples)
-        if not model_keys:
-            st.warning("JSON 文件中未找到有效的模型 QA 结果")
+        json_fields = extract_json_fields(samples)
+        if not json_fields:
+            st.warning("JSON 文件中未发现可用的字符串字段")
             st.stop()
         st.session_state["bench_samples"] = samples
-        st.session_state["bench_model_keys"] = model_keys
+        st.session_state["bench_json_fields"] = json_fields
         st.session_state.pop("bench_results", None)
         st.session_state["bench_current_idx"] = 0
-        st.success(f"扫描完成：找到 {len(samples)} 个评测样本，{len(model_keys)} 个模型")
+        st.success(f"扫描完成：找到 {len(samples)} 个评测样本，{len(json_fields)} 个可选字段")
 
     # ---- 参数设置与批量检索 ----
     if "bench_samples" in st.session_state:
         samples = st.session_state["bench_samples"]
-        model_keys = st.session_state["bench_model_keys"]
+        json_fields = st.session_state["bench_json_fields"]
 
-        p_c1, p_c2, p_c3, p_c4, p_c5 = st.columns([2, 2, 1, 1, 1])
+        # 第一行：字段选择 + 字段预览
+        field_c1, field_c2 = st.columns([1, 2])
+        with field_c1:
+            selected_field = st.selectbox(
+                "📝 文本检索字段",
+                json_fields,
+                help="选择 JSON 中哪个字段的内容用于语义文本检索",
+                key="bench_field_select",
+            )
+        with field_c2:
+            # 展示选中字段在前几个样本中的实际值，方便用户确认
+            if selected_field:
+                previews = preview_field_values(samples, selected_field, max_preview=3)
+                if previews:
+                    preview_str = " | ".join(f"`{v[:40]}`" for v in previews)
+                    st.markdown(f"**字段预览：**{preview_str}", help="前几个样本中该字段的实际值")
+                else:
+                    st.caption("该字段在当前样本中无有效值")
+
+        # 第二行：版本、Top-K、阈值、按钮
+        p_c1, p_c2, p_c3, p_c4 = st.columns([2, 1, 1, 1])
         with p_c1:
-            selected_model = st.selectbox("🤖 选择模型", model_keys, key="bench_model_select")
-        with p_c2:
             _bench_versions = discover_versions(IndexConfig().index_dir)
             bench_versions = st.multiselect(
                 "📦 数据版本", options=_bench_versions,
                 default=_bench_versions, key="bench_versions")
-        with p_c3:
+        with p_c2:
             bench_top_k = st.slider("Top-K", 1, 50, 5, key="bench_topk")
-        with p_c4:
+        with p_c3:
             bench_threshold = st.slider("相似度阈值", 0.0, 1.0, 0.5, 0.05,
                                         key="bench_threshold")
-        with p_c5:
+        with p_c4:
             st.markdown("<br>", unsafe_allow_html=True)
             run_clicked = st.button("🚀 开始批量检索", type="primary",
                                     use_container_width=True)
@@ -462,7 +483,7 @@ with tab_bench:
             status_text = st.empty()
 
             for i, sample in enumerate(samples):
-                entity_name = get_entity_name(sample, selected_model)
+                entity_name = get_field_value(sample, selected_field)
 
                 # 图像检索
                 try:
