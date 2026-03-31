@@ -604,6 +604,52 @@ with tab_bench:
                     height=min(400, 35 * len(df) + 38),
                 )
 
+            # ---- 导出结果 ----
+            st.markdown("")
+            export_c1, export_c2, _ = st.columns([1, 1, 3])
+
+            # 导出总览 CSV
+            with export_c1:
+                csv_data = df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 导出总览表 (CSV)",
+                    data=csv_data,
+                    file_name="benchmark_summary.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+            # 导出完整明细 JSON（含每个样本的 Top-K 检索结果）
+            with export_c2:
+                import json as _json
+                detail_rows = []
+                for stem, r in results.items():
+                    row = {
+                        "样本": stem,
+                        "检索文本": r["entity_name"] or "",
+                        "图像检索结果": [
+                            {"rank": ir.rank, "score": round(ir.score, 4),
+                             "text": ir.text, "source": ir.source,
+                             "image_path": ir.image_path}
+                            for ir in r["image_results"]
+                        ],
+                        "文本检索结果": [
+                            {"rank": tr.rank, "score": round(tr.score, 4),
+                             "text": tr.text, "source": tr.source,
+                             "image_path": tr.image_path}
+                            for tr in r["text_results"]
+                        ],
+                    }
+                    detail_rows.append(row)
+                json_data = _json.dumps(detail_rows, ensure_ascii=False, indent=2)
+                st.download_button(
+                    "📥 导出完整明细 (JSON)",
+                    data=json_data.encode("utf-8"),
+                    file_name="benchmark_detail.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+
             # ---- 逐样本浏览器 ----
             st.markdown("---")
             st.subheader("🔎 逐样本浏览")
@@ -611,23 +657,34 @@ with tab_bench:
             sample_stems = list(results.keys())
             num_samples = len(sample_stems)
 
-            # 导航
+            # 导航回调（在 rerun 前更新 state，避免被 number_input 覆盖）
+            def _go_prev():
+                idx = st.session_state.get("bench_current_idx", 0)
+                st.session_state["bench_current_idx"] = max(0, idx - 1)
+                st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
+
+            def _go_next():
+                idx = st.session_state.get("bench_current_idx", 0)
+                st.session_state["bench_current_idx"] = min(num_samples - 1, idx + 1)
+                st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
+
+            def _on_jump():
+                st.session_state["bench_current_idx"] = st.session_state["bench_jump"] - 1
+
             nav_c1, nav_c2, nav_c3, nav_c4 = st.columns([1, 1, 4, 1])
             with nav_c1:
-                if st.button("⬅️ 上一个", use_container_width=True, key="bench_prev"):
-                    idx = st.session_state.get("bench_current_idx", 0)
-                    st.session_state["bench_current_idx"] = max(0, idx - 1)
+                st.button("⬅️ 上一个", use_container_width=True,
+                          key="bench_prev", on_click=_go_prev)
             with nav_c2:
-                if st.button("下一个 ➡️", use_container_width=True, key="bench_next"):
-                    idx = st.session_state.get("bench_current_idx", 0)
-                    st.session_state["bench_current_idx"] = min(num_samples - 1, idx + 1)
+                st.button("下一个 ➡️", use_container_width=True,
+                          key="bench_next", on_click=_go_next)
             with nav_c3:
-                jump_idx = st.number_input(
+                st.number_input(
                     "跳转到", min_value=1, max_value=num_samples,
                     value=st.session_state.get("bench_current_idx", 0) + 1,
                     key="bench_jump",
+                    on_change=_on_jump,
                 )
-                st.session_state["bench_current_idx"] = jump_idx - 1
             with nav_c4:
                 st.markdown(
                     f"<div style='text-align:center;padding-top:28px;color:#666;'>"
