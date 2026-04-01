@@ -156,6 +156,72 @@ def get_service() -> RetrievalService:
     return RetrievalService(ModelConfig(), IndexConfig(), AppConfig())
 
 
+def _build_agree_zip(
+    results: dict, sample_category: dict, threshold: float,
+) -> bytes:
+    """
+    构建图文一致匹配的训练数据压缩包。
+
+    压缩包结构：
+        agree_matched_train_data/
+        ├── <query_stem>/
+        │   ├── <entity_name>_001.jpg
+        │   ├── <entity_name>_002.jpg
+        │   └── ...
+        └── matched_annotations.jsonl   ← 所有匹配记录，每行一条 JSON
+    """
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    jsonl_lines: list[str] = []
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for stem, cat in sample_category.items():
+            if cat != "图文一致":
+                continue
+
+            r = results[stem]
+            # 找到图文一致的训练实体名称（图像命中 ∩ 文本命中）
+            txt_texts = {
+                tr.text for tr in r["text_results"]
+                if tr.score >= threshold and tr.text
+            }
+            agree_img_results = [
+                ir for ir in r["image_results"]
+                if ir.score >= threshold and ir.text in txt_texts
+            ]
+
+            for idx, ir in enumerate(agree_img_results, 1):
+                # 读取训练图像字节
+                img_bytes = load_image_bytes(ir.image_path)
+                if not img_bytes:
+                    continue
+
+                # 安全文件名：去除特殊字符
+                safe_name = (ir.text or "unknown").replace("/", "_").replace("\\", "_")[:60]
+                img_filename = f"{stem}/{safe_name}_{idx:03d}.jpg"
+                zf.writestr(img_filename, img_bytes)
+
+                # JSONL 记录
+                jsonl_lines.append(json.dumps({
+                    "query_sample": stem,
+                    "query_text": r["entity_name"] or "",
+                    "matched_entity": ir.text,
+                    "image_score": round(ir.score, 4),
+                    "source": ir.source,
+                    "annotation": ir.annotation,
+                    "image_file": img_filename,
+                }, ensure_ascii=False))
+
+        # 写入汇总 JSONL
+        if jsonl_lines:
+            zf.writestr("matched_annotations.jsonl", "\n".join(jsonl_lines) + "\n")
+
+    return buf.getvalue()
+
+
 def render_result_card(result):
     """渲染单个检索结果卡片：图像 + 分数 + 实体名 + 来源 + 可展开的打标结果。"""
     card_cls, badge_cls = score_css_class(result.score)
@@ -673,7 +739,7 @@ with tab_bench:
 
             # ---- 导出结果 ----
             st.markdown("")
-            export_c1, export_c2, _ = st.columns([1, 1, 3])
+            export_c1, export_c2, export_c3 = st.columns([1, 1, 1])
 
             # 导出总览 CSV
             with export_c1:
@@ -716,6 +782,18 @@ with tab_bench:
                     file_name="benchmark_detail.json",
                     mime="application/json",
                     use_container_width=True,
+                )
+
+            # 导出图文一致匹配的训练图像 + JSONL 压缩包
+            with export_c3:
+                agree_stems = [s for s in results if sample_category.get(s) == "图文一致"]
+                st.download_button(
+                    f"📥 图文一致训练数据 ({len(agree_stems)})",
+                    data=_build_agree_zip(results, sample_category, threshold),
+                    file_name="agree_matched_train_data.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    disabled=(len(agree_stems) == 0),
                 )
 
             # ---- 逐样本浏览器 ----
