@@ -815,21 +815,35 @@ with tab_bench:
                 if st.session_state.get("bench_current_idx", 0) >= num_filtered:
                     st.session_state["bench_current_idx"] = 0
 
+                # 构建 selectbox 选项：序号 + 样本名 + 名称 + 分类标签
+                _cat_icons = {"图文一致": "🟣", "双重匹配": "🔴",
+                              "图像匹配": "🟠", "文本匹配": "🟡", "无匹配": "🟢"}
+                select_options = []
+                for i, s in enumerate(filtered_stems):
+                    entity = results[s]["entity_name"] or ""
+                    cat = sample_category.get(s, "")
+                    icon = _cat_icons.get(cat, "")
+                    label = f"{i+1}. {s}"
+                    if entity:
+                        label += f" — {entity[:30]}"
+                    label += f"  {icon}"
+                    select_options.append(label)
+
                 # 导航回调
                 def _go_prev():
                     idx = st.session_state.get("bench_current_idx", 0)
                     st.session_state["bench_current_idx"] = max(0, idx - 1)
-                    st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
 
                 def _go_next():
                     idx = st.session_state.get("bench_current_idx", 0)
                     st.session_state["bench_current_idx"] = min(num_filtered - 1, idx + 1)
-                    st.session_state["bench_jump"] = st.session_state["bench_current_idx"] + 1
 
-                def _on_jump():
-                    st.session_state["bench_current_idx"] = st.session_state["bench_jump"] - 1
+                def _on_select():
+                    chosen = st.session_state["bench_select"]
+                    idx = select_options.index(chosen)
+                    st.session_state["bench_current_idx"] = idx
 
-                nav_c1, nav_c2, nav_c3, nav_c4 = st.columns([1, 1, 4, 1])
+                nav_c1, nav_c2, nav_c3 = st.columns([1, 1, 6])
                 with nav_c1:
                     st.button("⬅️ 上一个", use_container_width=True,
                               key="bench_prev", on_click=_go_prev)
@@ -837,18 +851,14 @@ with tab_bench:
                     st.button("下一个 ➡️", use_container_width=True,
                               key="bench_next", on_click=_go_next)
                 with nav_c3:
-                    st.number_input(
-                        "跳转到", min_value=1, max_value=num_filtered,
-                        value=st.session_state.get("bench_current_idx", 0) + 1,
-                        key="bench_jump",
-                        on_change=_on_jump,
+                    current_idx = st.session_state.get("bench_current_idx", 0)
+                    st.selectbox(
+                        f"🔎 快速定位（共 {num_filtered} 个样本）",
+                        options=select_options,
+                        index=current_idx,
+                        key="bench_select",
+                        on_change=_on_select,
                     )
-                with nav_c4:
-                    filter_hint = f"（{selected_filter}）" if selected_filter != "全部" else ""
-                    st.markdown(
-                        f"<div style='text-align:center;padding-top:28px;color:#666;'>"
-                        f"共 {num_filtered} 个样本{filter_hint}</div>",
-                        unsafe_allow_html=True)
 
                 current_idx = st.session_state.get("bench_current_idx", 0)
                 current_stem = filtered_stems[current_idx]
