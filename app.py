@@ -158,32 +158,36 @@ def get_service() -> RetrievalService:
 
 def _build_agree_zip(
     results: dict, sample_category: dict, threshold: float,
+    progress_callback=None,
 ) -> bytes:
     """
     构建图文一致匹配的训练数据压缩包。
 
     压缩包结构：
-        agree_matched_train_data/
-        ├── <query_stem>/
+        <query_stem>/
         │   ├── <entity_name>_001.jpg
-        │   ├── <entity_name>_002.jpg
         │   └── ...
         └── matched_annotations.jsonl   ← 所有匹配记录，每行一条 JSON
+
+    Args:
+        progress_callback: 可选的进度回调 (current, total) -> None
     """
     import io
     import json
     import zipfile
 
+    agree_stems = [s for s, c in sample_category.items() if c == "图文一致"]
+    total = len(agree_stems)
+
     buf = io.BytesIO()
     jsonl_lines: list[str] = []
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for stem, cat in sample_category.items():
-            if cat != "图文一致":
-                continue
+        for si, stem in enumerate(agree_stems):
+            if progress_callback:
+                progress_callback(si, total)
 
             r = results[stem]
-            # 找到图文一致的训练实体名称（图像命中 ∩ 文本命中）
             txt_texts = {
                 tr.text for tr in r["text_results"]
                 if tr.score >= threshold and tr.text
@@ -194,17 +198,14 @@ def _build_agree_zip(
             ]
 
             for idx, ir in enumerate(agree_img_results, 1):
-                # 读取训练图像字节
                 img_bytes = load_image_bytes(ir.image_path)
                 if not img_bytes:
                     continue
 
-                # 安全文件名：去除特殊字符
                 safe_name = (ir.text or "unknown").replace("/", "_").replace("\\", "_")[:60]
                 img_filename = f"{stem}/{safe_name}_{idx:03d}.jpg"
                 zf.writestr(img_filename, img_bytes)
 
-                # JSONL 记录
                 jsonl_lines.append(json.dumps({
                     "query_sample": stem,
                     "query_text": r["entity_name"] or "",
@@ -215,9 +216,11 @@ def _build_agree_zip(
                     "image_file": img_filename,
                 }, ensure_ascii=False))
 
-        # 写入汇总 JSONL
         if jsonl_lines:
             zf.writestr("matched_annotations.jsonl", "\n".join(jsonl_lines) + "\n")
+
+        if progress_callback:
+            progress_callback(total, total)
 
     return buf.getvalue()
 
@@ -497,6 +500,7 @@ with tab_bench:
         st.session_state["bench_samples"] = samples
         st.session_state["bench_json_fields"] = json_fields
         st.session_state.pop("bench_results", None)
+        st.session_state.pop("_agree_zip_data", None)
         st.session_state["bench_current_idx"] = 0
         st.success(f"扫描完成：找到 {len(samples)} 个评测样本，{len(json_fields)} 个可选字段")
 
@@ -583,6 +587,10 @@ with tab_bench:
             status_text.empty()
             st.session_state["bench_results"] = results
             st.session_state["bench_current_idx"] = 0
+            # 清除导出缓存
+            for k in ("_export_csv", "_export_json", "_export_threshold",
+                       "_agree_zip_data", "_agree_zip_threshold"):
+                st.session_state.pop(k, None)
 
         # ---- 展示结果 ----
         if "bench_results" in st.session_state:
@@ -741,23 +749,15 @@ with tab_bench:
             st.markdown("")
             export_c1, export_c2, export_c3 = st.columns([1, 1, 1])
 
-            # 导出总览 CSV
-            with export_c1:
-                csv_data = df.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "📥 导出总览表 (CSV)",
-                    data=csv_data,
-                    file_name="benchmark_summary.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-            # 导出完整明细 JSON（含每个样本的 Top-K 检索结果）
-            with export_c2:
-                import json as _json
+            # 预构建导出数据（只算一次，缓存到 session_state）
+            import json as _json
+            if "_export_csv" not in st.session_state or \
+               st.session_state.get("_export_threshold") != threshold:
+                st.session_state["_export_csv"] = df.to_csv(
+                    index=False).encode("utf-8-sig")
                 detail_rows = []
                 for stem, r in results.items():
-                    row = {
+                    detail_rows.append({
                         "样本": stem,
                         "检索文本": r["entity_name"] or "",
                         "覆盖状态": sample_category.get(stem, ""),
@@ -773,28 +773,69 @@ with tab_bench:
                              "image_path": tr.image_path}
                             for tr in r["text_results"]
                         ],
-                    }
-                    detail_rows.append(row)
-                json_data = _json.dumps(detail_rows, ensure_ascii=False, indent=2)
+                    })
+                st.session_state["_export_json"] = _json.dumps(
+                    detail_rows, ensure_ascii=False, indent=2).encode("utf-8")
+                st.session_state["_export_threshold"] = threshold
+
+            # 导出总览 CSV
+            with export_c1:
+                st.download_button(
+                    "📥 导出总览表 (CSV)",
+                    data=st.session_state["_export_csv"],
+                    file_name="benchmark_summary.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+            # 导出完整明细 JSON
+            with export_c2:
                 st.download_button(
                     "📥 导出完整明细 (JSON)",
-                    data=json_data.encode("utf-8"),
+                    data=st.session_state["_export_json"],
                     file_name="benchmark_detail.json",
                     mime="application/json",
                     use_container_width=True,
                 )
 
-            # 导出图文一致匹配的训练图像 + JSONL 压缩包
+            # 导出图文一致匹配的训练图像 + JSONL 压缩包（两步：打包 → 下载）
             with export_c3:
                 agree_stems = [s for s in results if sample_category.get(s) == "图文一致"]
-                st.download_button(
-                    f"📥 图文一致训练数据 ({len(agree_stems)})",
-                    data=_build_agree_zip(results, sample_category, threshold),
-                    file_name="agree_matched_train_data.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                    disabled=(len(agree_stems) == 0),
-                )
+
+                # 阈值变化时清除旧缓存
+                cached_threshold = st.session_state.get("_agree_zip_threshold")
+                if cached_threshold != threshold:
+                    st.session_state.pop("_agree_zip_data", None)
+
+                if len(agree_stems) == 0:
+                    st.button("📦 打包图文一致数据 (0)", disabled=True,
+                              use_container_width=True)
+                elif "_agree_zip_data" not in st.session_state:
+                    # 还没打包 → 显示打包按钮
+                    if st.button(f"📦 打包图文一致数据 ({len(agree_stems)})",
+                                 use_container_width=True, type="primary"):
+                        progress = st.progress(0, text="正在打包图像 ...")
+                        def _update_progress(cur, tot):
+                            if tot > 0:
+                                progress.progress(
+                                    cur / tot,
+                                    text=f"打包中 ... {cur}/{tot}")
+                        zip_bytes = _build_agree_zip(
+                            results, sample_category, threshold,
+                            progress_callback=_update_progress)
+                        progress.empty()
+                        st.session_state["_agree_zip_data"] = zip_bytes
+                        st.session_state["_agree_zip_threshold"] = threshold
+                        st.rerun()
+                else:
+                    # 已打包 → 显示下载按钮
+                    st.download_button(
+                        f"📥 下载图文一致数据 ({len(agree_stems)})",
+                        data=st.session_state["_agree_zip_data"],
+                        file_name="agree_matched_train_data.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
 
             # ---- 逐样本浏览器 ----
             st.markdown("---")
